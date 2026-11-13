@@ -1,0 +1,282 @@
+{
+  "id": "alertaVagas00001",
+  "name": "Enviar alerta diário de vagas",
+  "description": "Todo dia às 8h busca vagas na Gupy (remotas ou em Mossoró, últimas 24 h), descarta golpes com a API do detector-golpe-vagas e manda um resumo por e-mail. Substitui a busca manual diária em vários sites.",
+  "active": false,
+  "nodes": [
+    {
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Todo dia às 8h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        320
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Definir buscas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        320
+      ],
+      "parameters": {
+        "jsCode": "// Edit here: search terms, places and how far back to look\nconst config = {\n  terms: ['python', 'desenvolvedor júnior', 'automação', 'inteligência artificial'],\n  remote: true,          // include 100% remote jobs from anywhere\n  cities: ['Mossoró'],   // on-site or hybrid only in these cities\n  maxAgeHours: 24,\n  limit: 100,            // Gupy results per search\n};\n\nconst places = [\n  ...(config.remote ? ['workplaceType=remote'] : []),\n  ...config.cities.map(c => 'city=' + encodeURIComponent(c)),\n];\n\nreturn config.terms.flatMap(term => places.map(place => ({\n  json: {\n    config,\n    url: `https://portal.gupy.io/api/job-search/jobs?jobName=${encodeURIComponent(term)}&limit=${config.limit}&${place}`,\n  },\n})));\n"
+      },
+      "notes": "Termos, cidades e janela de tempo ficam no topo deste código."
+    },
+    {
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Buscar vagas na Gupy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        320
+      ],
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (alerta-vagas)"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "API pública do portal de vagas da Gupy, sem autenticação. Uma chamada por termo e local."
+    },
+    {
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Filtrar vagas novas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        320
+      ],
+      "parameters": {
+        "jsCode": "// Merge every search, drop repeats, keep only allowed places and recent posts\nconst config = $('Definir buscas').first().json.config;\nconst norm = s => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();\nconst cities = config.cities.map(norm);\nconst cutoff = Date.now() - config.maxAgeHours * 3600 * 1000;\n\nconst seen = new Set();\nconst jobs = [];\nfor (const item of $input.all()) {\n  for (const v of item.json.data || []) {\n    const id = String(v.id);\n    if (seen.has(id)) continue;\n    seen.add(id);\n    const remote = v.workplaceType === 'remote';\n    const placeOk = remote ? config.remote : cities.includes(norm(v.city));\n    if (!placeOk || !(Date.parse(v.publishedDate) >= cutoff)) continue;\n    jobs.push({\n      id,\n      title: v.name,\n      company: v.careerPageName || '',\n      place: remote ? 'Remoto' : `${v.city}/${v.state}`,\n      url: v.jobUrl,\n      text: `Empresa: ${v.careerPageName || ''} ${v.name} ${v.description || ''}`.slice(0, 50000),\n    });\n  }\n}\n\nif (!jobs.length) return []; // nothing new today: stop here, no e-mail\n\n// The detector API takes up to 500 ads per call; a day of these searches stays far below that\nconst batch = jobs.slice(0, 500);\nreturn [{\n  json: {\n    jobs: batch,\n    payload: { jobs: batch.map(j => ({ id: j.id, title: j.title, text: j.text })) },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Checar golpe",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        320
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://detector:8000/analyze",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "notes": "API do projeto detector-golpe-vagas, que sobe junto no docker compose."
+    },
+    {
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Montar resumo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        320
+      ],
+      "parameters": {
+        "jsCode": "// Build the HTML e-mail: jobs worth reading first, then what the scam detector dropped\nconst jobs = $('Filtrar vagas novas').first().json.jobs;\nconst byId = Object.fromEntries(jobs.map(j => [j.id, j]));\n// the detector answers with a list; n8n turns each element into an item\nconst results = $input.all().flatMap(i => (Array.isArray(i.json) ? i.json : [i.json]));\n\nconst esc = s => String(s ?? '').replace(/[&<>\"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\nconst link = u => (/^https:\\/\\//.test(u || '') ? esc(u) : '#'); // job data is external input\n\nconst keep = results.filter(r => r.verdict === 'ok' || r.verdict === 'ALERTA');\nconst dropped = results.filter(r => !keep.includes(r));\n\nconst kept = keep.map(r => {\n  const j = byId[r.id];\n  const warn = r.verdict === 'ALERTA' ? ` <b>Atenção:</b> ${esc(r.signals.map(s => s.meaning).join('; '))}` : '';\n  return `<li><a href=\"${link(j.url)}\">${esc(j.title)}</a> · ${esc(j.company)} · ${esc(j.place)}${warn}</li>`;\n});\nconst gone = dropped.map(r => {\n  const j = byId[r.id];\n  return `<li>${esc(j.title)} · ${esc(j.company)}: ${esc(r.verdict)} (${esc(r.signals.map(s => s.code).join(', '))})</li>`;\n});\n\nconst html = [\n  `<h2>${keep.length} vaga(s) nova(s)</h2>`,\n  keep.length ? `<ul>${kept.join('')}</ul>` : '<p>Nenhuma vaga passou pelo detector hoje.</p>',\n  dropped.length ? `<h3>${dropped.length} descartada(s) pelo detector de golpe</h3><ul>${gone.join('')}</ul>` : '',\n].join('\\n');\n\nreturn [{ json: { subject: `Alerta de vagas: ${keep.length} nova(s)`, html } }];\n"
+      }
+    },
+    {
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Enviar resumo por e-mail",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1560,
+        320
+      ],
+      "parameters": {
+        "fromEmail": "={{ $env.ALERTA_EMAIL }}",
+        "toEmail": "={{ $env.ALERTA_EMAIL }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "id": "mailpitSmtp00001",
+          "name": "Mailpit (teste local)"
+        }
+      },
+      "notes": "Troque a credencial pela do Gmail (SMTP com senha de app) para receber de verdade."
+    },
+    {
+      "id": "b1000000-0000-4000-8000-000000000001",
+      "name": "Nota 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        404,
+        240
+      ],
+      "parameters": {
+        "content": "### Buscar\nVagas na Gupy por termo e local",
+        "width": 432,
+        "height": 272,
+        "color": 4
+      }
+    },
+    {
+      "id": "b1000000-0000-4000-8000-000000000002",
+      "name": "Nota 2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        844,
+        240
+      ],
+      "parameters": {
+        "content": "### Filtrar\nSó novas, remotas ou em Mossoró, sem golpe",
+        "width": 432,
+        "height": 272,
+        "color": 5
+      }
+    },
+    {
+      "id": "b1000000-0000-4000-8000-000000000003",
+      "name": "Nota 3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1284,
+        240
+      ],
+      "parameters": {
+        "content": "### Avisar\nResumo por e-mail",
+        "width": 432,
+        "height": 272,
+        "color": 3
+      }
+    },
+    {
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Executar agora",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        520
+      ],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Todo dia às 8h": {
+      "main": [
+        [
+          {
+            "node": "Definir buscas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Definir buscas": {
+      "main": [
+        [
+          {
+            "node": "Buscar vagas na Gupy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar vagas na Gupy": {
+      "main": [
+        [
+          {
+            "node": "Filtrar vagas novas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrar vagas novas": {
+      "main": [
+        [
+          {
+            "node": "Checar golpe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checar golpe": {
+      "main": [
+        [
+          {
+            "node": "Montar resumo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar resumo": {
+      "main": [
+        [
+          {
+            "node": "Enviar resumo por e-mail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Executar agora": {
+      "main": [
+        [
+          {
+            "node": "Definir buscas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Fortaleza"
+  },
+  "tags": []
+}

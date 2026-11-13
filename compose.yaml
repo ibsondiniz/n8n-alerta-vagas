@@ -1,0 +1,25 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.47.5
+    ports: ["5678:5678"]
+    environment:
+      GENERIC_TIMEZONE: America/Fortaleza
+      TZ: America/Fortaleza
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"   # lets the e-mail node read ALERTA_EMAIL
+      N8N_DIAGNOSTICS_ENABLED: "false"        # no telemetry from a personal instance
+      ALERTA_EMAIL: ${ALERTA_EMAIL:-alerta@exemplo.com}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n:/import:ro
+    entrypoint: ["/bin/sh", "/import/start.sh"]
+    depends_on: [detector, mailpit]
+
+  detector:   # scam detector API from the companion project
+    build: https://github.com/ibsondiniz/detector-golpe-vagas.git#main
+
+  mailpit:    # local inbox to test the e-mail without a real account: http://localhost:8025
+    image: axllent/mailpit:v1.33.1
+    ports: ["8025:8025"]
+
+volumes:
+  n8n_data:
