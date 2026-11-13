@@ -12,5 +12,5 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: node --test tests/
+      - run: node --test "tests/*.test.mjs"
       - run: docker compose config --quiet

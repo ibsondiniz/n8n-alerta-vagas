@@ -62,7 +62,7 @@ A senha fica guardada criptografada dentro do n8n, nunca neste repositório.
 A lógica dos nós de código é JavaScript. Os testes leem o código direto do arquivo exportado do workflow, então o que é testado é o que roda no n8n:
 
 ```bash
-node --test tests/
+node --test "tests/*.test.mjs"
 ```
 
 Eles verificam:
